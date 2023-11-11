@@ -1,23 +1,36 @@
 mod types;
 
 use std::collections::HashMap;
-use derive_more::IsVariant;
+use std::fmt::Debug;
+// use std::error::Error;
+use std::fmt::Formatter;
+use crate::types::CellState;
 
 type FreqTable = HashMap<usize, usize>;
 
+#[derive(Clone, Copy)]
 struct Board<const C: usize> {
     inner: [CellState; C],
     width: usize,
     height: usize,
 }
 
+impl<const C: usize> Debug for Board<C> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        let mut f = f.debug_list();
+        for h in 0..self.height {
+            f.entry(
+                &&(self.inner[(h*self.width)..((h+1)*self.width)])
+            );
+        }
+
+        f.finish()
+    }
+}
+
 impl<const C: usize> Board<C> {
-    fn new(width: usize, height: usize) -> Self {
-        assert_eq!(
-            width * height,
-            C,
-            "width * height != C"
-        );
+    const fn new(width: usize, height: usize) -> Self {
+        if width * height != C { panic!("width * height != C") }
 
         Self {
             inner: [CellState::Dead; C],
@@ -26,22 +39,15 @@ impl<const C: usize> Board<C> {
         }
     }
 
-    // used to be named `initialize_buffer`
-    fn new_with_conf(width: usize, height: usize, conf: u64) -> Board<C> {
-        Board {
-            // could be improved but this is init code, idc
-            inner: (0..(width * height))
-                .map(move |i| CellState::from(conf & (1 << i)))
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap(),
-            width,
-            height,
+    // // used to be named `initialize_buffer`
+    fn replace_with_conf(&mut self, conf: u64) {
+        for (i, cell) in self.inner.iter_mut().enumerate() {
+            *cell = CellState::from(if (conf & (1 << (i as u64))) > 0 { 1 } else { 0 })
         }
     }
-
+    
     // was `neighbor_count`
-    fn alive_neighbor_count(&self, row: usize, col: usize) -> u8 {
+    fn alive_neighbor_count(&self, row: usize, col: usize) -> i32 {
         let width = self.width;
         let height = self.height;
 
@@ -54,44 +60,15 @@ impl<const C: usize> Board<C> {
         let yb = (height + row + 1) % height;
         // let (xl, xm, xr, yt, ym, yb) = dbg!((xl, xm, xr, yt, ym, yb));
 
-        (self.inner[xl + yt * width]) as u8
-        + (self.inner[xm + yt * width]) as u8
-        + (self.inner[xr + yt * width]) as u8
-        + (self.inner[xl + ym * width]) as u8
-        + (self.inner[xr + ym * width]) as u8
-        + (self.inner[xl + yb * width]) as u8
-        + (self.inner[xm + yb * width]) as u8
-        + (self.inner[xr + yb * width]) as u8
+        (self.inner[xl + yt * width]) as   i32
+        + (self.inner[xm + yt * width]) as i32
+        + (self.inner[xr + yt * width]) as i32
+        + (self.inner[xl + ym * width]) as i32
+        + (self.inner[xr + ym * width]) as i32
+        + (self.inner[xl + yb * width]) as i32
+        + (self.inner[xm + yb * width]) as i32
+        + (self.inner[xr + yb * width]) as i32
     }
-}
-
-impl From<u64> for CellState {
-    fn from(value: u64) -> Self {
-        if value == 0 {
-            CellState::Dead
-        // } else if value == 1 {
-        //     CellState::Alive
-        } else {
-            CellState::Alive
-            // panic!("we speak ones and zeroes only")
-        }
-    }
-}
-
-impl From<bool> for CellState {
-   fn from(value: bool) -> Self {
-        match value {
-            true => CellState::Alive,
-            false => CellState::Dead,
-        }
-   } 
-}
-
-#[repr(u8)]
-#[derive(Debug, Copy, Clone, IsVariant)]
-enum CellState {
-    Alive = 0,
-    Dead = 1,
 }
 
 fn main() {
@@ -102,14 +79,15 @@ fn main() {
 
 fn find_cycles<const C: usize>(width: usize, height: usize) -> FreqTable {
     let mut freq_table = HashMap::new();
+    let mut board1 = Board::<C>::new(width, height);
     let mut board2 = Board::<C>::new(width, height);
 
-    let mut i = 1;
-    while i < (i << (width * height)) {
-        let mut board1 = Board::<C>::new_with_conf(width, height, i);
-        let (start, end) = find_cycle(&mut board1, &mut board2,  0, 0);
+    let len = 1 << C;
+    for i in 0..len {
+        // println!("b1: {:?}\nb2: {:?}", board1, board2);
+        board1.replace_with_conf(i);
+        let (start, end) = find_cycle(&mut board1, &mut board2);
 
-        i += 1;
         let period = end - start;
         freq_table
             .entry(period)
@@ -123,13 +101,11 @@ fn find_cycles<const C: usize>(width: usize, height: usize) -> FreqTable {
 fn find_cycle<const C: usize>(
     buffer1: &mut Board<C>,
     buffer2: &mut Board<C>,
-    mut cycle_start: usize,
-    mut cycle_end: usize,
 ) -> (usize, usize) {
     let mut turn: bool = true;
     let mut frame: usize = 0;
 
-    let mut state_dict: HashMap<usize, usize> = HashMap::new();
+    let mut state_dict: HashMap<u64, u64> = HashMap::new();
 
     loop {
         let (from, to): (&mut Board<C>, &mut Board<C>) = match turn {
@@ -139,23 +115,14 @@ fn find_cycle<const C: usize>(
 
         let s = next_gen(from, to);
 
-        state_dict
-            .entry(s as usize)
-            .and_modify(|c| {
-                cycle_start = *c;
-                cycle_end = frame;
-            })
-            .or_insert(frame);
-
-        if state_dict.get(&(s as usize)).is_some() {
-            return (*state_dict.get(&(s as usize)).unwrap(), frame);
+        if let Some(&something) = state_dict.get(&s) {
+            return (something as usize, frame);
         } else {
-            state_dict.insert(s as usize, frame);
+            state_dict.insert(s, frame as u64);
         }
 
-
         turn = !turn;
-        frame += frame;
+        frame += 1;
     }
 }
 
@@ -174,6 +141,7 @@ fn next_gen<const C: usize>(
             let n: usize = current.alive_neighbor_count(i % height, j % width) as usize;
             let index: usize = j + i * width;
             // println!("{:?}", index);
+            // println!("{:?}", next.inner[index]);
             next.inner[index] = (n == 3 || (n == 2 && current.inner[index].is_dead())).into();
 
             // println!("{:?}", index);
@@ -181,7 +149,7 @@ fn next_gen<const C: usize>(
                 state = state | (1 << index);
             }
             // println!("{:?}", index);
-    });
+        });
 
     state
 }
